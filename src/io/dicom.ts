@@ -23,6 +23,18 @@ export type SpatialParameters = Pick<
 // volume ID => file names
 export type VolumesToFileNamesMap = Record<string, string[]>;
 
+export const volumeKeySuffixSep = '#';
+
+export const volumeKeyGetSuffix = (volumeKey: string) => {
+  if (volumeKey) {
+    const i = volumeKey.indexOf(volumeKeySuffixSep);
+    if (i !== -1) {
+      return volumeKey.substring(i + 1);
+    }
+  }
+  return '';
+};
+
 /**
  * Filenames must be sanitized prior to being passed into itk-wasm.
  *
@@ -62,7 +74,8 @@ async function runTask(
  */
 export async function splitAndSort<T>(
   instances: T[],
-  mapToBlob: (inst: T, index: number) => Blob
+  mapToBlob: (inst: T, index: number) => Blob,
+  volumeKeySuffix?: string
 ) {
   const inputs = await Promise.all(
     instances.map(async (instance, index) => {
@@ -95,6 +108,14 @@ export async function splitAndSort<T>(
   const volumeToFileIndexes = JSON.parse(
     (result.outputs[0].data as TextStream).data
   ) as VolumesToFileNamesMap;
+
+  // Append volumeKeySuffix (volumeKeyUID)
+  if (volumeKeySuffix) {
+    Object.entries(volumeToFileIndexes).forEach(([volumeKey, fileIndexes]) => {
+      volumeToFileIndexes[`${volumeKey}${volumeKeySuffixSep}${volumeKeySuffix}`] = fileIndexes;
+      delete volumeToFileIndexes[volumeKey];
+    });
+  }
 
   const volumeToInstances = Object.fromEntries(
     Object.entries(volumeToFileIndexes).map(([volumeKey, fileIndexes]) => [

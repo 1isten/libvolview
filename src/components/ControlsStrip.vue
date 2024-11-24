@@ -22,7 +22,7 @@ interface Props {
 
 defineProps<Props>();
 
-const emit = defineEmits(['click:left-menu']);
+const emit = defineEmits(['click:left-menu', 'click:close']);
 
 function useViewLayout() {
   const viewStore = useViewStore();
@@ -210,7 +210,7 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
         size="40"
         icon="mdi-exit-to-app"
         name="Close"
-        @click.stop
+        @click="emit('click:close')"
       />
     </template>
   </div>

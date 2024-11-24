@@ -6,6 +6,8 @@ import '@kitware/vtk.js/Rendering/OpenGL/Profiles/Geometry';
 import '@kitware/vtk.js/Rendering/OpenGL/Profiles/Volume';
 import '@kitware/vtk.js/Rendering/OpenGL/Profiles/Glyph';
 
+import mitt from 'mitt';
+
 import { createApp } from 'vue';
 import VueToast from 'vue-toastification';
 import { createPinia } from 'pinia';
@@ -49,6 +51,8 @@ pinia.use(CorePiniaProviderPlugin({}));
 pinia.use(StoreRegistry);
 
 const app = createApp(App);
+app.config.globalProperties.emitter = mitt();
+app.provide('bus', app.config.globalProperties.emitter);
 
 initErrorReporting(app);
 

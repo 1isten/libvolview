@@ -89,7 +89,8 @@ const importConfigs = async (
 };
 
 const importDicomFiles = async (
-  dicomDataSources: Array<DataSourceWithFile>
+  dicomDataSources: Array<DataSourceWithFile>,
+  volumeKeySuffix?: string
 ) => {
   const resultSources: DataSource = {
     dicomSrc: {
@@ -103,7 +104,7 @@ const importDicomFiles = async (
         data: [],
       };
     }
-    const volumeKeys = await useDICOMStore().importFiles(dicomDataSources);
+    const volumeKeys = await useDICOMStore().importFiles(dicomDataSources, volumeKeySuffix);
     return {
       ok: true as const,
       data: volumeKeys.map((key) => ({
@@ -126,7 +127,7 @@ const importDicomFiles = async (
   }
 };
 
-export async function importDataSources(dataSources: DataSource[]) {
+export async function importDataSources(dataSources: DataSource[], volumeKeySuffix?: string) {
   const importContext = {
     fetchFileCache: new Map<string, File>(),
     dicomDataSources: [] as DataSourceWithFile[],
@@ -157,7 +158,7 @@ export async function importDataSources(dataSources: DataSource[]) {
   );
 
   const configResult = await importConfigs(results);
-  const dicomResult = await importDicomFiles(importContext.dicomDataSources);
+  const dicomResult = await importDicomFiles(importContext.dicomDataSources, volumeKeySuffix);
 
   return [
     ...results,

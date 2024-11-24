@@ -6,6 +6,8 @@ import * as DICOM from '@/src/io/dicom';
 import { identity, pick, removeFromArray } from '../utils';
 import { useImageStore } from './datasets-images';
 import { useFileStore } from './datasets-files';
+import { useLoadDataStore } from './load-data';
+import { useViewStore } from './views';
 import { StateFile, DatasetType } from '../io/state-file/schema';
 import { serializeData } from '../io/state-file/utils';
 import { useMessageStore } from './messages';
@@ -257,9 +259,10 @@ export const useDICOMStore = defineStore('dicom', {
     needsRebuild: {},
   }),
   actions: {
+    volumeKeyGetSuffix: DICOM.volumeKeyGetSuffix,
     readDicomTags,
 
-    async importFiles(datasets: DataSourceWithFile[]) {
+    async importFiles(datasets: DataSourceWithFile[], volumeKeySuffix?: string) {
       if (!datasets.length) return [];
 
       const fileToDataSource = new Map(
@@ -267,9 +270,66 @@ export const useDICOMStore = defineStore('dicom', {
       );
       const allFiles = [...fileToDataSource.keys()];
 
-      const volumeToFiles = await DICOM.splitAndSort(allFiles, identity);
-      if (Object.keys(volumeToFiles).length === 0)
+      const volumeToFiles = await DICOM.splitAndSort(allFiles, identity, volumeKeySuffix);
+      if (Object.keys(volumeToFiles).length === 0) {
         throw new Error('No volumes categorized from DICOM file(s)');
+      } else {
+        /*
+        const volumeKeys = Object.keys(volumeToFiles);
+        for (let i = 0; i < volumeKeys.length; i++) {
+          const volumeKey = volumeKeys[i];
+          // eslint-disable-next-line no-await-in-loop
+          const filesWithTagsInfo = await Promise.all(
+            volumeToFiles[volumeKey].map(async file => {
+              const tags = await this.readDicomTags(file, [
+                ...instanceTags,
+              ]);
+              const windowLevels = getWindowLevels({
+                WindowLevel: tags.WindowLevel,
+                WindowWidth: tags.WindowWidth,
+              });
+              return {
+                file,
+                tags: {
+                  ...tags,
+                  InstanceNumber: `${parseInt(tags.InstanceNumber || '0', 10)}`,
+                  WindowLevel: `${windowLevels[0]?.level || tags.WindowLevel}`,
+                  WindowWidth: `${windowLevels[0]?.width || tags.WindowWidth}`,
+                },
+              };
+            })
+          );
+          filesWithTagsInfo.sort((a, b) => +a.tags.InstanceNumber - +b.tags.InstanceNumber);
+          let reSorted = false;
+          let windowingDiffs= false;
+          const windowLevels: number[] = [];
+          const windowWidths: number[] = [];
+          const tags: Record<string, string>[] = [];
+          volumeToFiles[volumeKey].forEach((file, idx) => {
+            const { file: fileSorted, tags: fileTags } = filesWithTagsInfo[idx];
+            if (file !== fileSorted) {
+              volumeToFiles[volumeKey][idx] = fileSorted;
+              reSorted = true;
+            }
+            tags[idx] = fileTags;
+            windowLevels.push(Number(fileTags.WindowLevel));
+            windowWidths.push(Number(fileTags.WindowWidth));
+          });
+          if (
+            Math.max(...windowLevels) !== Math.min(...windowLevels) ||
+            Math.max(...windowWidths) !== Math.min(...windowWidths)
+          ) {
+            windowingDiffs = true;
+          }
+          this.volumeSlicesInfo[volumeKey] = {
+            reSorted,
+            tags,
+            windowingDiffs,
+            dataRanges: [],
+          };
+        }
+        */
+      }
 
       const fileStore = useFileStore();
 
@@ -422,8 +482,8 @@ export const useDICOMStore = defineStore('dicom', {
       await serializeData(stateFile, dataIDs, DatasetType.DICOM);
     },
 
-    async deserialize(files: DataSourceWithFile[]) {
-      return this.importFiles(files).then((volumeKeys) => {
+    async deserialize(files: DataSourceWithFile[], volumeKeySuffix?: string) {
+      return this.importFiles(files, volumeKeySuffix).then((volumeKeys) => {
         if (volumeKeys.length !== 1) {
           // Volumes are store individually so we should get one back.
           throw new Error('Invalid state file.');
@@ -512,6 +572,32 @@ export const useDICOMStore = defineStore('dicom', {
         const info = this.volumeInfo[volumeKey];
         const name = getDisplayName(info);
         imageStore.addVTKImageData(name, volumeBuildResults.image, volumeKey);
+
+        // auto set layout to be the correct axis view (when loaded by bus)
+        const loadDataStore = useLoadDataStore();
+        const viewStore = useViewStore();
+        const viewID = imageStore.getPrimaryViewID(volumeKey);
+        const volumeKeySuffix = this.volumeKeyGetSuffix(volumeKey);
+        if (volumeKeySuffix) {
+          if (viewID) {
+            const { layoutName, defaultSlices, slice } = loadDataStore.getLoadedByBus(volumeKeySuffix);
+            if (layoutName === undefined) {
+              loadDataStore.setLoadedByBus(volumeKeySuffix, {
+                layoutName: viewStore.getLayoutByViewID(viewID),
+              });
+            }
+            if (slice !== undefined && (defaultSlices === undefined || defaultSlices[viewID] === undefined)) {
+              loadDataStore.setLoadedByBus(volumeKeySuffix, {
+                defaultSlices: {
+                  ...(defaultSlices || {}),
+                  [viewID]: slice,
+                },
+              });
+            }
+          }
+        } else if (viewID) {
+          // viewStore.setLayoutByViewID(viewID);
+        }
       }
 
       const messageStore = useMessageStore();

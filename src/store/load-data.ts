@@ -2,10 +2,56 @@ import { useMessageStore } from '@/src/store/messages';
 import { Maybe } from '@/src/types';
 import { logError } from '@/src/utils/loggers';
 import { defineStore } from 'pinia';
-import { computed, ref, watch } from 'vue';
+import { computed, ref, shallowRef, watch } from 'vue';
 import { useToast } from '@/src/composables/useToast';
 import { TYPE } from 'vue-toastification';
 import { ToastID, ToastOptions } from 'vue-toastification/dist/types/types';
+import { toDataSelection } from '@/src/io/import/importDataSources';
+
+export interface LoadEventOptions {
+  uid?: string; // shortcut for volumeKeyUID
+  volumeKeyUID?: string; // alias for volumeKeySuffix
+  volumeKeySuffix?: string; // make use of volumeKeySuffix as UID
+  layoutName?: string;
+  defaultSlices?: {
+    Axial?: number;
+    Sagittal?: number;
+    Coronal?: number;
+  };
+  slice?: number;
+}
+
+export interface LoadEvent extends LoadEventOptions {
+  urlParams: {
+    urls: [string];
+    names?: [string];
+    // DICOMweb options:
+    dicomWebURL?: string;
+    studyInstanceUID?: string;
+    seriesInstanceUID?: string;
+    sopInstanceUID?: string;
+  };
+}
+
+export type Events = {
+  // received from outside
+  onload: LoadEvent;
+  onunload: void;
+  onunselect: void;
+  // ...
+
+  // emit to outside
+  onslicing?: {
+    uid: string;
+    slice: number;
+  };
+  onclose?: void;
+  // ...
+};
+
+export interface LoadedByBusDataRecord extends LoadEventOptions {
+  selection?: ReturnType<typeof toDataSelection>;
+};
 
 const NotificationMessages = {
   Loading: 'Loading datasets...',
@@ -95,11 +141,26 @@ export function useLoadingNotifications() {
   };
 }
 
-const useLoadDataStore = defineStore('loadData', () => {
+export const useLoadDataStore = defineStore('loadData', () => {
   const { startLoading, stopLoading, setError, isLoading } =
     useLoadingNotifications();
 
   const segmentGroupExtension = ref('');
+
+  const imageIDToVolumeKeyUID = shallowRef<Record<string, string>>(Object.create(null));
+  const loadedByBus = shallowRef<Record<string, LoadedByBusDataRecord>>(Object.create(null));
+  const isLoadingByBus = ref(false);
+  const getLoadedByBus = (volumeKeyUID: string | undefined) => volumeKeyUID ? loadedByBus.value[volumeKeyUID] : {};
+  const setLoadedByBus = (volumeKeyUID: string | undefined, value: LoadedByBusDataRecord) => {
+    if (!volumeKeyUID) {
+      return value;
+    }
+    loadedByBus.value[volumeKeyUID] = {
+      ...(loadedByBus.value[volumeKeyUID] || {}),
+      ...value
+    };
+    return loadedByBus.value[volumeKeyUID];
+  };
 
   return {
     segmentGroupExtension,
@@ -107,6 +168,12 @@ const useLoadDataStore = defineStore('loadData', () => {
     startLoading,
     stopLoading,
     setError,
+
+    imageIDToVolumeKeyUID,
+    loadedByBus,
+    getLoadedByBus,
+    setLoadedByBus,
+    isLoadingByBus,
   };
 });
 

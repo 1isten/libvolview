@@ -5,11 +5,14 @@ import {
   DataSource,
   getDataSourceName,
 } from '@/src/io/import/dataSource';
-import useLoadDataStore from '@/src/store/load-data';
+import { useLoadDataStore, type LoadEventOptions } from '@/src/store/load-data';
 import { useDatasetStore } from '@/src/store/datasets';
+import { useImageStore } from '@/src/store/datasets-images';
 import { useDICOMStore } from '@/src/store/datasets-dicom';
 import { useLayersStore } from '@/src/store/datasets-layers';
 import { useSegmentGroupStore } from '@/src/store/segmentGroups';
+import { useViewSliceStore } from '@/src/store/view-configs/slicing';
+import { useViewStore } from '@/src/store/views';
 import { wrapInArray, nonNullable } from '@/src/utils';
 import { basename } from '@/src/utils/path';
 import { parseUrl } from '@/src/utils/url';
@@ -27,6 +30,10 @@ import {
   isLoadableResult,
   isVolumeResult,
 } from '@/src/io/import/common';
+import {
+  fetchSeries,
+  fetchInstance,
+} from '@/src/core/dicom-web-api';
 
 // higher value priority is preferred for picking a primary selection
 const BASE_MODALITY_TYPES = {
@@ -230,14 +237,14 @@ function loadSegmentations(
   });
 }
 
-function loadDataSources(sources: DataSource[]) {
+function loadDataSources(sources: DataSource[], volumeKeySuffix?: string) {
   const load = async () => {
     const loadDataStore = useLoadDataStore();
     const dataStore = useDatasetStore();
 
     let results: ImportDataSourcesResult[];
     try {
-      results = await importDataSources(sources);
+      results = await importDataSources(sources, volumeKeySuffix);
     } catch (error) {
       loadDataStore.setError(error as Error);
       return;
@@ -245,7 +252,7 @@ function loadDataSources(sources: DataSource[]) {
 
     const [succeeded, errored] = partitionResults(results);
 
-    if (!dataStore.primarySelection && succeeded.length) {
+    if ((!dataStore.primarySelection || true) && succeeded.length) {
       const primaryDataSource = findBaseDataSource(
         succeeded,
         loadDataStore.segmentGroupExtension
@@ -253,6 +260,11 @@ function loadDataSources(sources: DataSource[]) {
 
       if (isVolumeResult(primaryDataSource)) {
         const selection = toDataSelection(primaryDataSource);
+        if (volumeKeySuffix) {
+          loadDataStore.setLoadedByBus(volumeKeySuffix, {
+            selection,
+          });
+        }
         dataStore.setPrimarySelection(selection);
         loadLayers(primaryDataSource, succeeded);
         loadSegmentations(
@@ -310,9 +322,9 @@ export function openFileDialog() {
   });
 }
 
-export async function loadFiles(files: File[]) {
+export async function loadFiles(files: File[], volumeKeySuffix?: string) {
   const dataSources = files.map(fileToDataSource);
-  return loadDataSources(dataSources);
+  return loadDataSources(dataSources, volumeKeySuffix);
 }
 
 export async function loadUserPromptedFiles() {
@@ -320,7 +332,7 @@ export async function loadUserPromptedFiles() {
   return loadFiles(files);
 }
 
-export async function loadUrls(params: UrlParams) {
+export async function loadUrls(params: UrlParams, options?: LoadEventOptions) {
   const urls = wrapInArray(params.urls);
   const names = wrapInArray(params.names ?? []); // optional names should resolve to [] if params.names === undefined
   const sources = urls.map((url, idx) =>
@@ -331,6 +343,146 @@ export async function loadUrls(params: UrlParams) {
         url
     )
   );
+
+  // intercept load event from bus emitter
+  if (options) {
+    const loadDataStore = useLoadDataStore();
+    const { volumeKeySuffix, ...loadOptions } = options;
+    loadDataStore.setLoadedByBus(volumeKeySuffix, {
+      volumeKeySuffix,
+      volumeKeyUID: loadOptions.volumeKeyUID || volumeKeySuffix,
+      ...loadOptions,
+    });
+
+    const dataStore = useDatasetStore();
+
+    const handleCache = () => {
+      let cacheHit = false;
+      let cacheIsInvalid = false;
+      if (volumeKeySuffix) {
+        const { selection, layoutName } = loadDataStore.getLoadedByBus(volumeKeySuffix);
+        if (selection) {
+          const imageStore = useImageStore();
+          const imageID = selection;
+          if (imageID) {
+            const viewSliceStore = useViewSliceStore();
+            const { defaultSlices, slice } = loadOptions;
+            if (!defaultSlices && slice !== undefined) {
+              const viewID = imageStore.getPrimaryViewID(imageID) || layoutName && layoutName.includes(' Only') && layoutName.replace(' Only', '');
+              if (viewID) {
+                viewSliceStore.updateConfig(viewID, imageID, {
+                  slice,
+                });
+              }
+            } else if (defaultSlices) {
+              Object.entries(defaultSlices).forEach(([viewID, s]) => {
+                viewSliceStore.updateConfig(viewID, imageID, {
+                  slice: s,
+                });
+              });
+            }
+            dataStore.setPrimarySelection(selection);
+            cacheHit = true;
+            cacheIsInvalid = false;
+          } else if (imageID in loadDataStore.imageIDToVolumeKeyUID) {
+            delete loadDataStore.imageIDToVolumeKeyUID[imageID];
+            cacheHit = false;
+            cacheIsInvalid = true;
+          }
+        }
+      }
+      if (cacheHit && cacheIsInvalid && volumeKeySuffix) {
+        delete loadDataStore.loadedByBus[volumeKeySuffix];
+        cacheHit = false;
+      }
+      return !cacheHit;
+    };
+
+    const onBeforeLoadedByBus = () => {
+      loadDataStore.isLoadingByBus = true;
+      const { layoutName } = loadDataStore.getLoadedByBus(volumeKeySuffix);
+      if (layoutName) {
+        const viewStore = useViewStore();
+        viewStore.setLayoutByName(layoutName);
+      }
+      return loadDataStore.isLoadingByBus;
+    };
+
+    const onAfterLoadedByBus = async () => {
+      const selection = dataStore.primarySelection;
+      if (volumeKeySuffix && selection) {
+        const tryGetImageID = async (retryCount = 100) => {
+          let imageID;
+          while (!imageID && retryCount > 0) {
+            imageID = selection;
+            // eslint-disable-next-line no-await-in-loop, no-promise-executor-return
+            await new Promise(r => setTimeout(r, 10));
+            // eslint-disable-next-line no-param-reassign
+            retryCount--;
+          }
+          return imageID;
+        };
+        const imageID = await tryGetImageID();
+        if (imageID) {
+          loadDataStore.imageIDToVolumeKeyUID[imageID] = volumeKeySuffix;
+        }
+        const tryGetLayoutName = async (retryCount = 100) => {
+          let layoutName;
+          while (!layoutName && retryCount > 0) {
+            layoutName = loadDataStore.getLoadedByBus(volumeKeySuffix).layoutName;
+            // eslint-disable-next-line no-await-in-loop, no-promise-executor-return
+            await new Promise(r => setTimeout(r, 10));
+            // eslint-disable-next-line no-param-reassign
+            retryCount--;
+          }
+          return layoutName;
+        };
+        const layoutName = await tryGetLayoutName();
+        if (layoutName) {
+          const viewStore = useViewStore();
+          viewStore.setLayoutByName(layoutName);
+        }
+      }
+      loadDataStore.isLoadingByBus = false;
+      return loadDataStore.getLoadedByBus(volumeKeySuffix);
+    };
+
+    const dicomWebURL = params.dicomWebURL?.toString();
+    if (dicomWebURL) {
+      const dicomWebFiles: File[] = [];
+      const studyInstanceUID = params.studyInstanceUID?.toString();
+      const seriesInstanceUID = params.seriesInstanceUID?.toString();
+      const sopInstanceUID = params.sopInstanceUID?.toString();
+      if (studyInstanceUID && seriesInstanceUID) {
+        if (sopInstanceUID) {
+          try {
+            const file = await fetchInstance(dicomWebURL, {
+              studyInstanceUID,
+              seriesInstanceUID,
+              sopInstanceUID,
+            });
+            dicomWebFiles.push(file);
+          } catch (error) {
+            console.error(error);
+          }
+        } else {
+          try {
+            const files = await fetchSeries(dicomWebURL, {
+              studyInstanceUID,
+              seriesInstanceUID,
+            }, ({ loaded, total }: ProgressEvent) => {
+              console.info(`fetching series ${loaded} of ${total}`);
+            });
+            dicomWebFiles.push(...files);
+          } catch (error) {
+            console.error(error);
+          }
+        }
+      }
+      return handleCache() && onBeforeLoadedByBus() && loadFiles(dicomWebFiles, volumeKeySuffix).then(onAfterLoadedByBus);
+    }
+    return handleCache() && onBeforeLoadedByBus() && loadDataSources(sources, volumeKeySuffix).then(onAfterLoadedByBus);
+  }
 
   return loadDataSources(sources);
 }

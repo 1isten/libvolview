@@ -20,7 +20,7 @@
         </v-navigation-drawer>
         <v-main id="content-main">
           <div class="fill-height d-flex flex-row flex-grow-1">
-            <controls-strip :has-data="hasData" :left-menu="leftSideBar" @click:left-menu="leftSideBar = !leftSideBar"></controls-strip>
+            <controls-strip :has-data="hasData" :left-menu="leftSideBar" @click:left-menu="leftSideBar = !leftSideBar" @click:close="emitter.emit('close')"></controls-strip>
             <div class="d-flex flex-column flex-grow-1">
               <layout-grid v-show="hasData" :layout="layout" />
               <welcome-page
@@ -59,7 +59,8 @@ import { storeToRefs } from 'pinia';
 import { UrlParams } from '@vueuse/core';
 import vtkURLExtract from '@kitware/vtk.js/Common/Core/URLExtract';
 import { useDisplay } from 'vuetify';
-import useLoadDataStore from '@/src/store/load-data';
+import { useLoadDataStore, type Events as EventHandlers, type LoadEvent } from '@/src/store/load-data';
+import { useDatasetStore } from '@/src/store/datasets';
 import { useViewStore } from '@/src/store/views';
 import useRemoteSaveStateStore from '@/src/store/remote-save-state';
 import AppBar from '@/src/components/AppBar.vue';
@@ -80,6 +81,7 @@ import { useImageStore } from '@/src/store/datasets-images';
 import { useServerStore } from '@/src/store/server';
 import { useGlobalErrorHook } from '@/src/composables/useGlobalErrorHook';
 import { useKeyboardShortcuts } from '@/src/composables/useKeyboardShortcuts';
+import { useEventBus } from '@/src/composables/useEventBus';
 
 export default defineComponent({
   name: 'App',
@@ -116,6 +118,37 @@ export default defineComponent({
     const showLoading = computed(
       () => loadDataStore.isLoading || hasData.value
     );
+
+    // --- event handling --- //
+
+    const dataStore = useDatasetStore();
+    const { emitter } = useEventBus(({
+      onload(payload: LoadEvent) {
+        const { urlParams, ...options } = payload;
+
+        if (!urlParams || !urlParams.urls) {
+          return;
+        }
+
+        // make use of volumeKeyUID (if any) as volumeKeySuffix (if it is not specified)
+        const volumeKeyUID = options.volumeKeyUID || options.uid;
+        if (volumeKeyUID) {
+          if (!('volumeKeySuffix' in options)) options.volumeKeySuffix = volumeKeyUID;
+          delete options.uid;
+        }
+
+        loadUrls(payload.urlParams, options);
+      },
+      onunload() {
+        // remove all data loaded by event bus
+        Object.keys(loadDataStore.imageIDToVolumeKeyUID).forEach(imageID => {
+          dataStore.remove(imageID);
+        });
+      },
+      onunselect() {
+        dataStore.setPrimarySelection(null);
+      },
+    } as unknown as EventHandlers));
 
     // --- parse URL -- //
 
@@ -158,6 +191,8 @@ export default defineComponent({
     const display = useDisplay();
 
     return {
+      emitter,
+
       leftSideBar: ref(!display.mobile.value) && ref(false),
       loadUserPromptedFiles,
       loadFiles,

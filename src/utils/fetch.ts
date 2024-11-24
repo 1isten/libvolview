@@ -25,6 +25,9 @@ interface URLHandler {
  */
 const HTTPHandler: URLHandler = {
   testURL: (url) => {
+    if (url.startsWith('connect:')) {
+      return true;
+    }
     const { protocol } = parseUrl(url, window.location.href);
     return protocol === 'http:' || protocol === 'https:';
   },
